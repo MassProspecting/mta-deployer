@@ -18,6 +18,48 @@ module BlackStack
         @@namecheap_username = nil
         @@namecheap_client_ip = nil
         
+        module DnsRecordModule
+            attr_accessor :record_type, :host_name, :address, :ttl
+
+            def self.descriptor_errors(h)
+                errors = []
+                # mandatory fields
+                errors << "record_type is required" if h[:record_type].nil?
+                errors << "host_name is required" if h[:host_name].nil?
+                errors << "address is required" if h[:address].nil?
+                errors << "ttl is required" if h[:ttl].nil?
+                # record_type must be a valid DNS record type
+                errors << "record_type must be a valid DNS record type" if !['A', 'AAAA', 'CNAME', 'MX', 'NS', 'TXT', 'SRV', 'CAA'].include?(h[:record_type])
+                # host_name must be a string
+                errors << "host_name must be a valid DNS host name" if !h[:host_name].is_a?(String)
+                # address must be a string
+                errors << "address must be a valid DNS address" if !h[:address].is_a?(String)
+                # ttl must be an integer
+                errors << "ttl must be a valid DNS ttl" if !h[:ttl].is_a?(Integer)
+                # return errors
+                return errors
+            end
+
+            def initialize(h)
+                errors = BlackStack::MtaDeployer::DnsRecordModule.descriptor_errors(h)
+                raise "Invalid DnsRecord descriptor: #{errors.join(', ')}" if errors.length > 0
+                # mandatory fields
+                @record_type = h[:record_type]
+                @host_name = h[:host_name]
+                @address = h[:address]
+                @ttl = h[:ttl]
+            end
+
+            def self.to_hash
+                return {
+                    :record_type => @record_type,
+                    :host_name => @host_name,
+                    :address => @address,
+                    :ttl => @ttl,
+                }
+            end
+        end # module DnsRecordModule
+
         # inherit BlackStack::Deployer::NodeModule, including features of deployer.
         module NodeModule
             attr_accessor :domain, :addresses
@@ -51,7 +93,7 @@ module BlackStack
                 raise "The node descriptor is not valid: #{errors.uniq.join(".\n")}" if errors.length > 0
                 super(h, i_logger)
                 self.domain = h[:domain]
-                self.addresses = h[:addresses]
+                self.addresses = h[:addresses] || []
                 self.deployment_routine = h[:deployment_routine]
             end # def self.create(h)
         
@@ -63,14 +105,50 @@ module BlackStack
             end # def to_hash
             
             # setup MX, SPF, DKIM and DMARC records for the domain
-            def setup_dns(host_name, record_type, address, ttl=3600)
+            def setup_dns(dnsrecords=[])
+                # validate: dnsrecords must be an array of hashes
+                # validate: each hash in the array dnsrecords must pass the validation of DnsRecordModule.descriptor_errors
+                raise "The parameter dnsrecords is not an array" unless dnsrecords.is_a?(Array)
+                dnsrecords.each do |dnsrecord|
+                    raise "The parameter dnsrecords contains a non-hash element" unless dnsrecord.is_a?(Hash)
+                    errors = BlackStack::MtaDeployer::DnsRecordModule.descriptor_errors(dnsrecord)
+                    raise "The parameter dnsrecords contains an invalid hash element: #{errors.uniq.join(".\n")}" if errors.length > 0
+                end
+                # map parameters
                 sld = self.domain.split('.').first
                 tld = self.domain.split('.').last
-                url = "https://api.namecheap.com/xml.response?apiuser=#{namecheap_user}&apikey=#{namecheap_api_key}&username=#{namecheap_username}&Command=namecheap.domains.dns.setHosts&ClientIp=#{namecheap_client_ip}&SLD=#{sld}&TLD=#{tld}&HostName1=#{host_name}&RecordType1=#{record_type}&Address1=#{address}&TTL1=#{ttl}"
+                namecheap_user = BlackStack::MtaDeployer.namecheap_user
+                namecheap_username = BlackStack::MtaDeployer.namecheap_username
+                namecheap_api_key = BlackStack::MtaDeployer.namecheap_api_key
+                namecheap_client_ip = BlackStack::MtaDeployer.namecheap_client_ip
+                # build URL for api call
+                i = 0
+                url = "https://api.namecheap.com/xml.response?apiuser=#{namecheap_user}&apikey=#{namecheap_api_key}&username=#{namecheap_username}&Command=namecheap.domains.dns.setHosts&ClientIp=#{namecheap_client_ip}&SLD=#{sld}&TLD=#{tld}"
+                dnsrecords.each { |h|
+                    i += 1
+                    # create DnRecord object
+                    o = BlackStack::MtaDeployer::DnsRecord.new(h)
+                    url += "&HostName#{i}=#{o.host_name}&RecordType#{i}=#{o.record_type}&Address#{i}=#{o.address}&TTL#{i}=#{o.ttl}"
+                }
+                # perform api call
+                uri = URI(url)
+                res = Net::HTTP.get(uri)
+                res                
+            end
+
+            # return an array of blacklists where the IP of this node is listed.
+            def check_blacklists
+                # TODO: Code Me!
+            end
+
+            # run all the steps to install Postfix on the node, and setup its domain too.
+            def deploy
+                # TODO: Code Me!
             end
 
         end # module NodeModule
-    
+
+        
         # TODO: declare these classes (stub and skeleton) using blackstack-rpc
         #
         # Stub Classes
@@ -79,6 +157,13 @@ module BlackStack
         class Node
             include BlackStack::MtaDeployer::NodeModule
         end # class Node
+
+        class DnsRecord
+            include BlackStack::MtaDeployer::DnsRecordModule
+        end # class Node
+
+
+        # module functions
 
         # validate the configuration descriptor
         def self.descriptor_errors(h)
@@ -122,8 +207,30 @@ module BlackStack
             @@namecheap_user = h[:namecheap_user]
             @@namecheap_username = h[:namecheap_username]
             @@namecheap_client_ip = h[:namecheap_client_ip]
+            # set nodes
+            if h.has_key?(:nodes)
+                @@nodes = h[:nodes].map do |node|
+                    BlackStack::MtaDeployer::Node.new(node)
+                end
+            end
         end
 
+        # get the nodes
+        def self.nodes
+            @@nodes
+        end
+        def self.namecheap_api_key
+            @@namecheap_api_key
+        end
+        def self.namecheap_user
+            @@namecheap_user
+        end
+        def self.namecheap_username
+            @@namecheap_username
+        end
+        def self.namecheap_client_ip
+            @@namecheap_client_ip
+        end
 
     end
 end
